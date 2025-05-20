@@ -2,7 +2,12 @@ import cv2
 import numpy as np
 import scipy.signal as signal
 import scipy.fftpack as fftpack
+from pympler import asizeof
 
+def get_total_size_in_mb(obj):
+    size_in_bytes = asizeof.asizeof(obj)
+    size_in_mb = size_in_bytes / (1024 * 1024)  # Convert bytes to MB
+    return round(size_in_mb, 2)
 
 #convert RBG to YIQ
 def rgb2ntsc(src):
@@ -151,16 +156,25 @@ def reconstract_from_tensorlist(filter_tensor_list,levels=3):
 #manify motion
 def magnify_motion(video_name,low,high,levels=3,amplification=20):
     t,f=load_video(video_name)
-    lap_video_list=laplacian_video(t,levels=levels)
-    filter_tensor_list=[]
+    lap_video_list=laplacian_video(t,levels=levels)#del t after this
+    filter_tensor_list=[]#12.5 to 4.5 here
+    del t#8 here
     for i in range(levels):
         filter_tensor=butter_bandpass_filter(lap_video_list[i],low,high,f)
         filter_tensor*=amplification
         filter_tensor_list.append(filter_tensor)
+        lap_video_list[i]=None#min goes to 4.5 again but after this 8.2 available
     recon=reconstract_from_tensorlist(filter_tensor_list)
-    final=t+recon
+    del filter_tensor_list
+    del lap_video_list
+    del filter_tensor
+    t,f=load_video(video_name)# del f again possible
+    del f
+    final=t+recon#again 4.5 here
+    del t
+    del recon
     save_video(final)
 
 if __name__=="__main__":
-    # magnify_color("baby.mp4",0.4,3)
-    magnify_motion("baby.mp4",0.4,3)
+    #magnify_color(r"C:\Users\username\Downloads\baby.mp4",0.4,3)
+    magnify_motion(r"C:\Users\username\Downloads\baby.mp4",0.4,3)
