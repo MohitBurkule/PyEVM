@@ -3,26 +3,24 @@ import numpy as np
 from scipy.signal import butter, lfilter
 import argparse
 
+
 def design_filter(low, high, fs, order=2):
-    """
-    Design a Butterworth bandpass filter.
-    """
     nyq = 0.5 * fs
     low_norm = low / nyq
     high_norm = high / nyq
     b, a = butter(order, [low_norm, high_norm], btype='band')
     return b, a
 
-def init_states(lap_shapes, channels, b, a):
-    """
-    Initialize filter states zi for each Laplacian level.
-    lap_shapes: list of (height, width) tuples for each level
-    """
-    order = max(len(a), len(b)) - 1
-    zi = [np.zeros((order, h, w, channels), dtype=np.float32) for (h, w) in lap_shapes]
-    return zi
 
-def process_stream(input_file, output_file, low, high, amplification=20, levels=3, order=2):
+def init_states(shapes, channels, b, a):
+    order = max(len(a), len(b)) - 1
+    return [np.zeros((order, h, w, channels), dtype=np.float32) for h, w in shapes]
+
+
+def process_stream(input_file, output_file, low, high, amplification=20, levels=3, order=2, chunk_size=100):
+    cv2.setUseOptimized(True)
+    cv2.setNumThreads(0)
+
     cap = cv2.VideoCapture(input_file)
     if not cap.isOpened():
         raise IOError(f"Cannot open video file {input_file}")
@@ -30,81 +28,71 @@ def process_stream(input_file, output_file, low, high, amplification=20, levels=
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Select codec based on output extension
     ext = output_file.split('.')[-1].lower()
-    if ext in ('mp4', 'mov', 'm4v'):
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    else:
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    fourcc = cv2.VideoWriter_fourcc(*('mp4v' if ext in ('mp4', 'mov', 'm4v') else 'MJPG'))
     out = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
 
-    # Design temporal filter
     b, a = design_filter(low, high, fps, order)
 
     # Precompute Gaussian pyramid shapes
-    gp_shapes = []
+    gp_shapes = [(height, width)]
     h, w = height, width
-    gp_shapes.append((h, w))
     for _ in range(levels):
-        # cv2.pyrDown uses (h+1)//2, (w+1)//2
-        new_h = (h + 1) // 2
-        new_w = (w + 1) // 2
-        gp_shapes.append((new_h, new_w))
-        h, w = new_h, new_w
-
-    # Laplacian shapes correspond to gp_shapes[0:levels]
+        h, w = (h + 1) // 2, (w + 1) // 2
+        gp_shapes.append((h, w))
     lap_shapes = gp_shapes[:levels]
 
-    # Initialize filter states for each level
     zi = init_states(lap_shapes, 3, b, a)
 
+    def read_chunk(n):
+        frames = []
+        for _ in range(n):
+            ret, frame = cap.read()
+            if not ret: break
+            frames.append(frame.astype(np.float32))
+        return frames
+
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        frames = read_chunk(chunk_size)
+        if not frames:
             break
-        frame_f = frame.astype(np.float32)
-
-        # Build Gaussian pyramid
-        gp = [frame_f]
-        for lev in range(levels):
-            gp.append(cv2.pyrDown(gp[-1]))
-
-        # Build Laplacian pyramid (natural order: L0 largest -> L_{n-1} smallest)
-        lap = []
+        M = len(frames)
+        # Build Gaussian pyramid for chunk
+        gp_levels = [np.stack(frames)]
+        for lvl in range(levels):
+            gp_levels.append(np.array([cv2.pyrDown(f) for f in gp_levels[-1]]))
+        # Build Laplacian pyramid for chunk
+        lap_levels = []
         for i in range(levels):
-            up = cv2.pyrUp(gp[i+1], dstsize=(gp[i].shape[1], gp[i].shape[0]))
-            lap.append(gp[i] - up)
-
-        # Temporal filtering & amplification
+            up = np.array(
+                [cv2.pyrUp(f, dstsize=(gp_levels[i].shape[2], gp_levels[i].shape[1])) for f in gp_levels[i + 1]])
+            lap_levels.append(gp_levels[i] - up)
+        # Temporal filtering
         filtered = []
-        for idx, lvl in enumerate(lap):
-            # apply filter with state
-            y, zi[idx] = lfilter(b, a, lvl[np.newaxis, ...], axis=0, zi=zi[idx])
-            # amplify
-            filtered.append(y[0] * amplification)
-
-        # Reconstruct motion signal from smallest to largest
-        recon = filtered[-1]
-        for j in range(levels-2, -1, -1):
-            recon = cv2.pyrUp(recon, dstsize=(filtered[j].shape[1], filtered[j].shape[0])) + filtered[j]
-
-        # Add motion back to original and write
-        output_frame = frame_f + recon
-        output_frame = np.clip(output_frame, 0, 255).astype(np.uint8)
-        out.write(output_frame)
+        for i, lap in enumerate(lap_levels):
+            y, zi[i] = lfilter(b, a, lap, axis=0, zi=zi[i])
+            filtered.append(y * amplification)
+        # Reconstruction and write
+        for j in range(M):
+            recon = filtered[-1][j]
+            for k in range(levels - 2, -1, -1):
+                recon = cv2.pyrUp(recon, dstsize=(filtered[k].shape[2], filtered[k].shape[1])) + filtered[k][j]
+            out.write(np.clip(frames[j] + recon, 0, 255).astype(np.uint8))
 
     cap.release()
     out.release()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Streaming Eulerian Video Motion Magnification")
-    parser.add_argument("input", help="Path to input video file")
-    parser.add_argument("output", help="Path to output video file")
-    parser.add_argument("--low", type=float, default=0.4, help="Low cutoff frequency (Hz)")
-    parser.add_argument("--high", type=float, default=3.0, help="High cutoff frequency (Hz)")
-    parser.add_argument("--amplification", type=float, default=20.0, help="Motion amplification factor")
-    parser.add_argument("--levels", type=int, default=3, help="Number of pyramid levels")
-    parser.add_argument("--order", type=int, default=2, help="Butterworth filter order")
-    args = parser.parse_args()
 
-    process_stream(args.input, args.output, args.low, args.high, args.amplification, args.levels, args.order)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fast chunked Eulerian Video Magnification")
+    parser.add_argument("input", help="Input video path")
+    parser.add_argument("output", help="Output video path")
+    parser.add_argument("--low", type=float, default=0.4, help="Low cutoff freq (Hz)")
+    parser.add_argument("--high", type=float, default=3.0, help="High cutoff freq (Hz)")
+    parser.add_argument("--amplification", type=float, default=20.0, help="Amplification factor")
+    parser.add_argument("--levels", type=int, default=3, help="Pyramid levels")
+    parser.add_argument("--order", type=int, default=2, help="Filter order")
+    parser.add_argument("--chunk_size", type=int, default=200, help="Frames per chunk")
+    args = parser.parse_args()
+    process_stream(args.input, args.output, args.low, args.high, args.amplification, args.levels, args.order,
+                   args.chunk_size)
