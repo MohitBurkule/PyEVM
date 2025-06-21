@@ -3,6 +3,9 @@ import numpy as np
 import scipy.signal as signal
 import scipy.fftpack as fftpack
 from pympler import asizeof
+import sys
+import argparse
+import os
 
 def get_total_size_in_mb(obj):
     size_in_bytes = asizeof.asizeof(obj)
@@ -104,22 +107,23 @@ def reconstract_video(amp_video,origin_video,levels=3):
     return final_video
 
 #save video to files
-def save_video(video_tensor):
+def save_video(video_tensor, output_path="/app/output/out.avi"):
     fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
     [height,width]=video_tensor[0].shape[0:2]
-    writer = cv2.VideoWriter("out.avi", fourcc, 30, (width, height), 1)
+    writer = cv2.VideoWriter(output_path, fourcc, 30, (width, height), 1)
     for i in range(0,video_tensor.shape[0]):
         writer.write(cv2.convertScaleAbs(video_tensor[i]))
     writer.release()
+    print("Video saved to: ",output_path)
 
 #magnify color
-def magnify_color(video_name,low,high,levels=3,amplification=20):
+def magnify_color(video_name,low,high,levels=3,amplification=20,output_path="/app/output/out.avi"):
     t,f=load_video(video_name)
     gau_video=gaussian_video(t,levels=levels)
     filtered_tensor=temporal_ideal_filter(gau_video,low,high,f)
     amplified_video=amplify_video(filtered_tensor,amplification=amplification)
     final=reconstract_video(amplified_video,t,levels=3)
-    save_video(final)
+    save_video(final, output_path)
 
 #build laplacian pyramid for video
 def laplacian_video(video_tensor,levels=3):
@@ -154,7 +158,7 @@ def reconstract_from_tensorlist(filter_tensor_list,levels=3):
     return final
 
 #manify motion
-def magnify_motion(video_name,low,high,levels=3,amplification=20):
+def magnify_motion(video_name,low,high,levels=3,amplification=20,output_path="/app/output/out.avi"):
     t,f=load_video(video_name)
     lap_video_list=laplacian_video(t,levels=levels)#del t after this
     filter_tensor_list=[]#12.5 to 4.5 here
@@ -173,8 +177,30 @@ def magnify_motion(video_name,low,high,levels=3,amplification=20):
     final=t+recon#again 4.5 here
     del t
     del recon
-    save_video(final)
+    save_video(final, output_path)
 
 if __name__=="__main__":
-    #magnify_color(r"C:\Users\username\Downloads\baby.mp4",0.4,3)
-    magnify_motion(r"C:\Users\username\Downloads\baby.mp4",0.4,3)
+    parser = argparse.ArgumentParser(description='Eulerian Video Magnification')
+    parser.add_argument('video_path', help='Path to the MP4 video file')
+    parser.add_argument('--mode', choices=['color', 'motion'], default='motion',
+                        help='Magnification mode: color or motion (default: motion)')
+    parser.add_argument('--low', type=float, default=0.4,
+                        help='Low frequency bound (default: 0.4)')
+    parser.add_argument('--high', type=float, default=3.0,
+                        help='High frequency bound (default: 3.0)')
+    parser.add_argument('--levels', type=int, default=3,
+                        help='Number of pyramid levels (default: 3)')
+    parser.add_argument('--amplification', type=int, default=20,
+                        help='Amplification factor (default: 20)')
+    parser.add_argument('--output', type=str, default="/app/output/out.avi",
+                        help='Output video path (default: /app/output/out.avi)')
+    
+    args = parser.parse_args()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    
+    if args.mode == 'color':
+        magnify_color(args.video_path, args.low, args.high, args.levels, args.amplification, args.output)
+    else:
+        magnify_motion(args.video_path, args.low, args.high, args.levels, args.amplification, args.output)

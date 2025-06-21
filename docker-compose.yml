@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  evm:
+    build: .
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+    working_dir: /app
