@@ -1,6 +1,6 @@
 FROM python:3.5-slim
 
-# Install system dependencies for OpenCV
+# Install system dependencies for OpenCV and FFmpeg
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libsm6 \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libavcodec-dev \
     libavformat-dev \
     libswscale-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
